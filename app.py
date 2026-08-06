@@ -472,6 +472,101 @@ def fetch_rss2json(rss_url: str, max_items: int = 20) -> list:
     except Exception:
         return []
 
+# ── GNews API (bypasses server blocks for BD sources) ────────
+GNEWS_API_KEY = "2016c073f12008b1be7bff4d2a4ac8fc"
+GNEWS_URL     = "https://gnews.io/api/v4/search"
+GNEWS_TOP_URL = "https://gnews.io/api/v4/top-headlines"
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_gnews_source(domain: str, source_name: str, max_items: int = 10) -> list:
+    """
+    Fetch news from GNews API for a specific domain.
+    Works from Streamlit Cloud — bypasses server blocks.
+    """
+    try:
+        # Search by site domain
+        resp = requests.get(GNEWS_URL, params={
+            "q":        f"site:{domain}",
+            "lang":     "bn",
+            "country":  "bd",
+            "max":      max_items,
+            "apikey":   GNEWS_API_KEY,
+        }, timeout=12)
+        if resp.status_code != 200:
+            # Try English
+            resp = requests.get(GNEWS_URL, params={
+                "q":       f"site:{domain}",
+                "lang":    "en",
+                "country": "bd",
+                "max":     max_items,
+                "apikey":  GNEWS_API_KEY,
+            }, timeout=12)
+        if resp.status_code != 200:
+            return []
+        data    = resp.json()
+        articles = data.get("articles", [])
+        items   = []
+        for a in articles[:max_items]:
+            title    = a.get("title","").strip()
+            link     = a.get("url","").strip()
+            pub_text = a.get("publishedAt","")
+            if not title or not link:
+                continue
+            # Parse publishedAt (ISO 8601: 2026-07-14T10:30:00Z)
+            pub_dt = None
+            try:
+                pub_dt = datetime.strptime(pub_text[:19], "%Y-%m-%dT%H:%M:%S")
+            except Exception:
+                pass
+            age_h = _hours_ago(pub_dt)
+            items.append({
+                "title":     clean_gn_title(title),
+                "link":      link,
+                "pub_dt":    pub_dt,
+                "age_hours": age_h,
+                "source":    source_name,
+            })
+        return items
+    except Exception:
+        return []
+
+@st.cache_data(ttl=120, show_spinner=False)
+def fetch_gnews_bangladesh(max_items: int = 20) -> list:
+    """Fetch top Bangladesh news from GNews."""
+    try:
+        resp = requests.get(GNEWS_TOP_URL, params={
+            "lang":    "bn",
+            "country": "bd",
+            "max":     max_items,
+            "apikey":  GNEWS_API_KEY,
+        }, timeout=12)
+        if resp.status_code != 200:
+            return []
+        articles = resp.json().get("articles", [])
+        items = []
+        for a in articles:
+            title    = a.get("title","").strip()
+            link     = a.get("url","").strip()
+            pub_text = a.get("publishedAt","")
+            src_name = a.get("source",{}).get("name","")
+            if not title:
+                continue
+            pub_dt = None
+            try:
+                pub_dt = datetime.strptime(pub_text[:19], "%Y-%m-%dT%H:%M:%S")
+            except Exception:
+                pass
+            items.append({
+                "title":     clean_gn_title(title),
+                "link":      link,
+                "pub_dt":    pub_dt,
+                "age_hours": _hours_ago(pub_dt),
+                "source":    src_name,
+            })
+        return items
+    except Exception:
+        return []
+
 # ── Bad link patterns to reject ────────────────────────────
 _BAD_LINK_PATTERNS = [
     # Factcheck / revision pages
@@ -2040,6 +2135,11 @@ with tab_coverage:
                 if raw:     return raw[:max_items]
             except Exception:
                 continue
+        # GNews API final fallback
+        if domain:
+            gn_items = fetch_gnews_source(domain, domain, max_items)
+            if gn_items:
+                return gn_items
         return []
 
     @st.cache_data(ttl=60, show_spinner=False)
@@ -2084,6 +2184,9 @@ with tab_coverage:
                             break
                     except Exception:
                         pass
+            # GNews API final fallback
+            if not items and domain:
+                items = fetch_gnews_source(domain, sname, max_per)
             # Extra filter: reject video / bad links
             items = [i for i in items if i.get("link","").count("/") >= 3]
             result[sid] = {
@@ -2520,11 +2623,9 @@ with tab_reader:
             try:
                 raw = fetch_rss(url, 40)
                 if not raw:
-                    # Try RSS2JSON directly for this URL
                     raw = fetch_rss2json(url, 20)
                 if not raw:
                     continue
-                # Sort: dated items first (freshest), undated at end
                 with_dt = sorted(
                     [i for i in raw if i.get("pub_dt")],
                     key=lambda x: x.get("age_hours", 9999)
@@ -2537,6 +2638,12 @@ with tab_reader:
                     return result
             except Exception:
                 continue
+
+        # Final fallback: GNews API
+        if domain:
+            gnews_items = fetch_gnews_source(domain, src_id, 10)
+            if gnews_items:
+                return gnews_items
         return []
 
     # ── Init: NO sources selected by default ───────────────
